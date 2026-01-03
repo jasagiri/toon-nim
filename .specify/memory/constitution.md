@@ -1,50 +1,158 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+SYNC IMPACT REPORT
+==================
+Version change: 0.0.0 → 0.0.1
+Bump rationale: Initial draft of constitution (pre-release: 0.0.x series)
+
+Modified principles: N/A (initial creation)
+Added sections:
+  - 7 Core Principles (I-VII)
+  - Technology Constraints section
+  - Development Workflow section
+  - Governance section
+
+Removed sections: N/A (initial creation)
+
+Templates validation:
+  ✅ .specify/templates/plan-template.md - Constitution Check section present
+  ✅ .specify/templates/spec-template.md - Aligns with user story requirements
+  ✅ .specify/templates/tasks-template.md - TDD workflow supported
+
+Follow-up TODOs: None
+-->
+
+# Toon-Nim Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Library-First Architecture
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+All functionality MUST be implemented as standalone library modules before CLI integration.
+Libraries MUST be self-contained, independently testable, and well-documented.
+Each library MUST have a clear, single purpose—no organizational-only modules.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+**Rationale**: Ensures reusability, testability, and clean separation of concerns.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### II. CLI Interface Standard
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+Every library MUST expose its functionality via CLI commands.
+The CLI MUST follow the text I/O protocol: stdin/args → stdout, errors → stderr.
+All commands MUST support both JSON and human-readable output formats via flags.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+**Rationale**: Enables composability with Unix tools, scripting, and automated pipelines.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### III. Test-Driven Development (NON-NEGOTIABLE)
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+TDD is mandatory for all code changes. The workflow MUST be:
+1. Write test(s) that define expected behavior
+2. Verify test(s) fail (Red phase)
+3. Implement minimum code to pass (Green phase)
+4. Refactor while keeping tests green (Refactor phase)
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+No implementation code MUST be written without a failing test first.
+
+**Rationale**: Prevents regressions, ensures design quality, and provides living documentation.
+
+### IV. Integration Testing
+
+Integration tests MUST be written for:
+- New library contract boundaries
+- Changes to existing contracts
+- Inter-module communication
+- Shared data schemas and types
+
+Unit tests alone are insufficient for validating system behavior.
+
+**Rationale**: Catches integration failures that unit tests miss.
+
+### V. Observability
+
+All modules MUST implement structured logging with configurable verbosity levels.
+Text I/O ensures debuggability—logs MUST be human-readable by default.
+Error messages MUST include context sufficient for debugging without source access.
+
+**Rationale**: Production issues require clear visibility into system behavior.
+
+### VI. Versioning and Breaking Changes
+
+Version format MUST follow MAJOR.MINOR.PATCH (SemVer).
+Breaking changes to public APIs MUST:
+- Increment MAJOR version
+- Be documented in CHANGELOG
+- Provide migration guidance
+
+Deprecation MUST precede removal by at least one MINOR release.
+
+**Rationale**: Downstream consumers depend on predictable compatibility.
+
+### VII. Simplicity
+
+Start with the simplest solution that works. YAGNI (You Aren't Gonna Need It) applies.
+Complexity MUST be justified in writing before introduction.
+Prefer composition over inheritance; prefer data over abstraction.
+
+**Rationale**: Unnecessary complexity compounds maintenance burden.
+
+## Technology Constraints
+
+**Language**: Nim (latest stable release)
+**Build System**: Nimble
+**Testing Framework**: Nim's built-in `unittest` or `testament`
+**CLI Framework**: Standard library `parseopt` or `argparse` package
+**Output Formats**: JSON via `std/json`, human-readable via structured print
+
+All dependencies MUST be pinned to specific versions in `.nimble` file.
+External dependencies MUST be justified—prefer standard library when adequate.
+
+## Development Workflow
+
+### Code Review Requirements
+
+All changes MUST be reviewed before merge. Reviews MUST verify:
+- Compliance with TDD (tests written first)
+- Adherence to library-first architecture
+- CLI commands follow text I/O protocol
+- Adequate test coverage for the change scope
+
+### Quality Gates
+
+Before merge:
+1. All tests MUST pass
+2. No compiler warnings (treat warnings as errors)
+3. Code MUST be formatted with `nimpretty` or equivalent
+4. Documentation updated for public API changes
+
+### Branch Strategy
+
+Feature branches MUST follow pattern: `###-feature-name`
+Main branch MUST always be in a deployable state.
+Direct commits to main are prohibited.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+This constitution supersedes all other development practices and guidelines.
+All pull requests and code reviews MUST verify compliance with these principles.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+### Amendment Process
+
+1. Propose amendment with rationale in writing
+2. Discuss impact on existing code and workflows
+3. Obtain approval from project maintainers
+4. Document migration plan if breaking existing code
+5. Update constitution version per SemVer rules
+
+### Version Policy
+
+- MAJOR: Principle removal, redefinition, or backward-incompatible governance change
+- MINOR: New principle added or existing principle materially expanded
+- PATCH: Clarifications, wording improvements, non-semantic refinements
+
+### Compliance Review
+
+Quarterly reviews SHOULD assess:
+- Adherence to TDD across recent changes
+- Library architecture health
+- Test coverage trends
+- Breaking change management
+
+**Version**: 0.0.1 | **Ratified**: 2025-12-08 | **Last Amended**: 2025-12-08

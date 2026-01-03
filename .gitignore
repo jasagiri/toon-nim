@@ -1,0 +1,67 @@
+# Nim compiled binaries and cache
+nimcache/
+nimbledeps/
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+
+# Nimble package artifacts
+*.nimble-link
+
+# Build output directories
+build/
+
+# Debug binaries
+debug_*
+
+# Compiled CLI binary
+bin/tooncli
+
+# Compiled test binaries
+tests/unit/test_types
+tests/unit/test_utils
+tests/unit/test_scanner
+tests/unit/test_parser
+tests/unit/test_decoder
+tests/unit/test_encoder
+tests/integration/test_cli
+tests/integration/test_roundtrip
+tests/fixtures/run_fixtures
+
+# Temporary test files in root only
+/test_*.nim
+
+# Test artifacts
+htmldocs/
+testresults/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Claude Code
+.claude/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Environment and secrets
+.env
+.env.*
+*.local
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Specify (development scaffolding)
+.specify/
