@@ -3,7 +3,7 @@
 version       = "0.1.0"
 author        = "toon-nim contributors"
 description   = "TOON (Token-Oriented Object Notation) format library for Nim"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "src"
 bin           = @["bin/tooncli"]
 binDir        = "bin"
