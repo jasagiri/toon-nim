@@ -22,7 +22,7 @@ proc writeTempFile(content: string, ext: string): string =
 
 # The binary under test is built from the current sources once; a failed
 # build stops the run instead of testing a stale binary.
-let build = execCmdEx("nim c --hints:off -o:" & CliPath & " bin/tooncli.nim")
+let build = execCmdEx("nim c --hints:off -o:" & CliPath & " src/tooncli.nim")
 doAssert build.exitCode == 0, build.output
 
 # T060: TOON to JSON conversion tests

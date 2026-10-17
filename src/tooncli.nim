@@ -2,7 +2,7 @@
 ## Converts between TOON and JSON formats
 
 import std/[parseopt, strutils, os, json]
-import ../src/toon
+import toon
 
 const
   Version = "0.2.0"

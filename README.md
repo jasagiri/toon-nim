@@ -63,7 +63,7 @@ JSON-model equality of §2.
 ## CLI
 
 ```bash
-nimble buildCli
+nimble buildCli                       # or `nimble install`, which puts tooncli on PATH
 bin/tooncli data.json --toon          # JSON to TOON
 bin/tooncli data.toon --json          # TOON to JSON
 echo "name: Ada" | bin/tooncli - --json
