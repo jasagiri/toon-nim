@@ -255,12 +255,9 @@ suite "Error types":
 
 suite "Options defaults":
   test "defaultEncodeOptions":
-    check defaultEncodeOptions.indent == 2
+    check defaultEncodeOptions.indentSize == 2
     check defaultEncodeOptions.delimiter == dlComma
-    check defaultEncodeOptions.keyFolding == kfNone
-    check defaultEncodeOptions.sortKeys == false
 
   test "defaultDecodeOptions":
     check defaultDecodeOptions.strict == true
-    check defaultDecodeOptions.expandPaths == peNone
     check defaultDecodeOptions.indentSize == 2

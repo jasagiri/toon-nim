@@ -1,2 +1,7 @@
 toon-nim
 Copyright 2025 Gods & Golem, Inc.
+
+This product includes the TOON conformance fixtures (tests/fixtures/encode,
+tests/fixtures/decode, tests/fixtures.schema.json) from
+https://github.com/toon-format/spec, licensed under the MIT License,
+Copyright (c) 2025-PRESENT Johann Schopplich.

@@ -1,11 +1,11 @@
 ## TOON CLI Tool
 ## Converts between TOON and JSON formats
 
-import std/[parseopt, strutils, os, json, terminal, tables]
+import std/[parseopt, strutils, os, json]
 import ../src/toon
 
 const
-  Version = "0.1.0"
+  Version = "0.2.0"
   HelpText = """
 tooncli - TOON Format CLI Converter v""" & Version & """
 
@@ -24,13 +24,10 @@ Options:
   -o, --output FILE   Write output to file instead of stdout
   --pretty            Pretty-print JSON output (default)
   --compact           Compact JSON output
-  --indent N          Indentation size for TOON output (default: 2)
-  --delimiter TYPE    Array delimiter: comma, tab, pipe (default: comma)
-  --sort-keys         Sort object keys alphabetically
-  --fold-keys         Enable key folding (collapse nested single-key objects)
-  --expand-paths      Enable path expansion (expand dotted keys to nested objects)
-  --strict            Enable strict mode parsing
-  --lenient           Enable lenient mode parsing (default)
+  --indent N          Spaces per indentation level (default: 2)
+  --delimiter TYPE    Document delimiter: comma, tab, pipe (default: comma)
+  --strict            Strict decoding (default, TOON specification §14)
+  --lenient           Non-strict decoding: only the recoveries of §14.4
 
 Examples:
   tooncli data.toon --json           # Convert TOON to JSON
@@ -50,9 +47,6 @@ type
     prettyJson: bool
     indent: int
     delimiter: Delimiter
-    sortKeys: bool
-    foldKeys: bool
-    expandPaths: bool
     strict: bool
 
 proc parseArgs(): CliOptions =
@@ -63,10 +57,7 @@ proc parseArgs(): CliOptions =
     prettyJson: true,
     indent: 2,
     delimiter: dlComma,
-    sortKeys: false,
-    foldKeys: false,
-    expandPaths: false,
-    strict: false
+    strict: true
   )
 
   var p = initOptParser()
@@ -114,12 +105,6 @@ proc parseArgs(): CliOptions =
         else:
           stderr.writeLine("Error: Unknown delimiter: " & p.val)
           quit(1)
-      of "sort-keys":
-        result.sortKeys = true
-      of "fold-keys":
-        result.foldKeys = true
-      of "expand-paths":
-        result.expandPaths = true
       of "strict":
         result.strict = true
       of "lenient":
@@ -171,44 +156,6 @@ proc readInput(filename: string): string =
       quit(1)
     readFile(filename)
 
-proc toonValueToJsonNode(v: ToonValue): JsonNode =
-  ## Convert ToonValue to JsonNode
-  case v.kind
-  of vkNull: newJNull()
-  of vkBool: newJBool(v.boolVal)
-  of vkInt: newJInt(v.intVal)
-  of vkFloat: newJFloat(v.floatVal)
-  of vkString: newJString(v.strVal)
-  of vkArray:
-    var arr = newJArray()
-    for item in v.arrayVal:
-      arr.add(toonValueToJsonNode(item))
-    arr
-  of vkObject:
-    var obj = newJObject()
-    for key, val in v.objectVal:
-      obj[key] = toonValueToJsonNode(val)
-    obj
-
-proc jsonNodeToToonValue(j: JsonNode): ToonValue =
-  ## Convert JsonNode to ToonValue
-  case j.kind
-  of JNull: newToonNull()
-  of JBool: newToonBool(j.getBool())
-  of JInt: newToonInt(j.getInt())
-  of JFloat: newToonFloat(j.getFloat())
-  of JString: newToonString(j.getStr())
-  of JArray:
-    var arr = newToonArray()
-    for item in j:
-      arr.arrayVal.add(jsonNodeToToonValue(item))
-    arr
-  of JObject:
-    var obj = newToonObject()
-    for key, val in j.pairs:
-      obj.objectVal[key] = jsonNodeToToonValue(val)
-    obj
-
 proc main() =
   let opts = parseArgs()
 
@@ -226,33 +173,24 @@ proc main() =
     case outputFormat
     of ofJson:
       # TOON to JSON
-      let decodeOpts = DecodeOptions(
-        strict: opts.strict,
-        expandPaths: if opts.expandPaths: peSafe else: peNone,
-        indentSize: opts.indent
-      )
-      let toonVal = decode(content, decodeOpts)
-      let jsonNode = toonValueToJsonNode(toonVal)
+      let decodeOpts = DecodeOptions(strict: opts.strict, indentSize: opts.indent)
+      let jsonNode = decode(content, decodeOpts).toJsonNode()
       if opts.prettyJson:
         output = jsonNode.pretty()
       else:
         output = $jsonNode
     of ofToon:
       # JSON to TOON
-      let jsonNode = parseJson(content)
-      let toonVal = jsonNodeToToonValue(jsonNode)
-      let encodeOpts = EncodeOptions(
-        indent: opts.indent,
-        delimiter: opts.delimiter,
-        keyFolding: if opts.foldKeys: kfSafe else: kfNone,
-        sortKeys: opts.sortKeys
-      )
-      output = encode(toonVal, encodeOpts)
+      let encodeOpts = EncodeOptions(indentSize: opts.indent, delimiter: opts.delimiter)
+      output = encode(parseJson(content), encodeOpts)
     of ofAuto:
       # Should not reach here
       output = content
 
   except ToonDecodeError as e:
+    stderr.writeLine("Error: " & e.msg)
+    quit(1)
+  except ToonEncodeError as e:
     stderr.writeLine("Error: " & e.msg)
     quit(1)
   except JsonParsingError as e:

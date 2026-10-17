@@ -20,11 +20,13 @@ proc writeTempFile(content: string, ext: string): string =
   writeFile(path, content)
   path
 
+# The binary under test is built from the current sources once; a failed
+# build stops the run instead of testing a stale binary.
+let build = execCmdEx("nim c --hints:off -o:" & CliPath & " bin/tooncli.nim")
+doAssert build.exitCode == 0, build.output
+
 # T060: TOON to JSON conversion tests
 suite "CLI TOON to JSON":
-  setup:
-    # Ensure CLI is built before running tests
-    discard execCmd("nim c -o:" & CliPath & " bin/tooncli.nim 2>/dev/null")
 
   test "convert simple TOON to JSON":
     let toonContent = "name: Ada\nage: 42"
@@ -53,7 +55,7 @@ address:
     check parsed["address"]["city"].getStr == "London"
 
   test "convert array TOON to JSON":
-    let toonContent = "nums: 1, 2, 3"
+    let toonContent = "nums[3]: 1,2,3"
     let path = writeTempFile(toonContent, ".toon")
     defer: removeFile(path)
 
@@ -113,8 +115,7 @@ suite "CLI JSON to TOON":
 
     let (output, exitCode) = runCli("--toon " & path)
     check exitCode == 0
-    check "items:" in output or "items :" in output
-    check "1" in output
+    check output.strip == "items[3]: 1,2,3"
 
   test "auto-detect JSON input format":
     let jsonContent = """{"greeting": "hello"}"""
@@ -209,17 +210,5 @@ suite "CLI encoding options":
 
     let (output, exitCode) = runCli("--toon --delimiter=tab " & path)
     check exitCode == 0
-    check "\t" in output or "1" in output
+    check output.strip == "nums[3\t]: 1\t2\t3"
 
-  test "sort keys":
-    let jsonContent = """{"z": 1, "a": 2}"""
-    let path = writeTempFile(jsonContent, ".json")
-    defer: removeFile(path)
-
-    let (output, exitCode) = runCli("--toon --sort-keys " & path)
-    check exitCode == 0
-    let aPos = output.find("a:")
-    let zPos = output.find("z:")
-    # When sorted, 'a' should come before 'z'
-    if aPos >= 0 and zPos >= 0:
-      check aPos < zPos

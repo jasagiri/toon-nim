@@ -21,11 +21,7 @@ bin/tooncli
 
 # Compiled test binaries
 tests/unit/test_types
-tests/unit/test_utils
-tests/unit/test_scanner
-tests/unit/test_parser
-tests/unit/test_decoder
-tests/unit/test_encoder
+tests/external/test_host_rules
 tests/integration/test_cli
 tests/integration/test_roundtrip
 tests/fixtures/run_fixtures

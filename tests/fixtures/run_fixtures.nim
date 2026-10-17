@@ -1,184 +1,121 @@
-## Fixture Test Runner for TOON format tests
-## Runs the official test fixtures from toon-format/spec
+## Runs the official TOON conformance fixtures (toon-format/spec) against
+## this library. Every case is an external specification test; the run fails
+## unless all of them pass.
 
-import std/[json, os, strutils, tables]
+import std/[json, os, strutils, algorithm, parseutils]
 import ../../src/toon
 
 type
-  TestResult = object
-    name: string
+  Outcome = object
+    file, name, detail: string
     passed: bool
-    error: string
 
-proc toonToJson(v: ToonValue): JsonNode =
-  ## Convert ToonValue to JsonNode for comparison
-  case v.kind
-  of vkNull: result = newJNull()
-  of vkBool: result = newJBool(v.boolVal)
-  of vkInt: result = newJInt(v.intVal)
-  of vkFloat: result = newJFloat(v.floatVal)
-  of vkString: result = newJString(v.strVal)
-  of vkArray:
-    result = newJArray()
-    for item in v.arrayVal:
-      result.add(toonToJson(item))
-  of vkObject:
-    result = newJObject()
-    for key, val in v.objectVal:
-      result[key] = toonToJson(val)
+proc isUnquotedNumber(j: JsonNode): bool =
+  ## std/json keeps an integer literal beyond int64 as a JString whose `$` is
+  ## the bare literal; the flag that marks it is not exported.
+  j.kind == JString and ($j).len > 0 and ($j)[0] != '"'
 
-proc compareJson(got, expected: JsonNode): bool =
-  ## Deep compare two JSON values
-  if got.kind != expected.kind:
-    return false
+proc numberValue(j: JsonNode): float =
+  case j.kind
+  of JInt: float(j.getBiggestInt)
+  of JFloat: j.getFloat
+  else:
+    var f: float
+    discard parseFloat(j.getStr, f)
+    f
 
+proc isNumber(j: JsonNode): bool =
+  j.kind in {JInt, JFloat} or j.isUnquotedNumber
+
+proc sameValue(got, expected: JsonNode): bool =
+  ## JSON-model equality of the specification (§2): numbers by mathematical
+  ## value, objects by their ordered key sequence.
+  if got.isNumber or expected.isNumber:
+    return got.isNumber and expected.isNumber and
+           got.numberValue == expected.numberValue
+  if got.kind != expected.kind: return false
   case expected.kind
-  of JNull:
-    return true
-  of JBool:
-    return got.getBool() == expected.getBool()
-  of JInt:
-    return got.getInt() == expected.getInt()
-  of JFloat:
-    return abs(got.getFloat() - expected.getFloat()) < 0.0001
-  of JString:
-    return got.getStr() == expected.getStr()
+  of JNull: true
+  of JBool: got.getBool == expected.getBool
+  of JString: got.getStr == expected.getStr
   of JArray:
-    if got.len != expected.len:
-      return false
-    for i in 0..<expected.len:
-      if not compareJson(got[i], expected[i]):
-        return false
-    return true
+    if got.len != expected.len: return false
+    for i in 0 ..< expected.len:
+      if not sameValue(got[i], expected[i]): return false
+    true
   of JObject:
-    if got.len != expected.len:
-      return false
-    for key, val in expected.pairs:
-      if not got.hasKey(key):
-        return false
-      if not compareJson(got[key], val):
-        return false
-    return true
+    if got.len != expected.len: return false
+    var gotKeys, expectedKeys: seq[string]
+    for k, _ in got: gotKeys.add k
+    for k, _ in expected: expectedKeys.add k
+    if gotKeys != expectedKeys: return false
+    for k, v in expected:
+      if not sameValue(got[k], v): return false
+    true
+  of JInt, JFloat: false
 
-proc getDecodeOptions(test: JsonNode): DecodeOptions =
-  ## Extract decode options from test case
-  result = DecodeOptions(strict: false, expandPaths: peNone, indentSize: 2)
+proc delimiterOf(s: string): Delimiter =
+  case s
+  of "\t": dlTab
+  of "|": dlPipe
+  else: dlComma
 
-  if test.hasKey("options"):
-    let opts = test["options"]
-    if opts.hasKey("strict"):
-      result.strict = opts["strict"].getBool()
-    if opts.hasKey("expandPaths"):
-      let ep = opts["expandPaths"].getStr()
-      if ep == "safe":
-        result.expandPaths = peSafe
-      elif ep == "aggressive" or ep == "all":
-        result.expandPaths = peAll
-    if opts.hasKey("indent"):
-      result.indentSize = opts["indent"].getInt()
+proc encodeOptionsOf(t: JsonNode): EncodeOptions =
+  result = defaultEncodeOptions
+  let o = t{"options"}
+  if o.isNil: return
+  if o.hasKey("delimiter"): result.delimiter = delimiterOf(o["delimiter"].getStr)
+  if o.hasKey("indentSize"): result.indentSize = o["indentSize"].getInt
 
-proc runDecodeTest(test: JsonNode): TestResult =
-  ## Run a single decode test
-  result.name = test["name"].getStr()
+proc decodeOptionsOf(t: JsonNode): DecodeOptions =
+  result = defaultDecodeOptions
+  let o = t{"options"}
+  if o.isNil: return
+  if o.hasKey("strict"): result.strict = o["strict"].getBool
+  if o.hasKey("indentSize"): result.indentSize = o["indentSize"].getInt
 
-  let opts = getDecodeOptions(test)
-
-  # Check for expected error tests (supports both "error" and "shouldError" keys)
-  let shouldError = (test.hasKey("error") and test["error"].getBool()) or
-                    (test.hasKey("shouldError") and test["shouldError"].getBool())
-  if shouldError:
-    try:
-      let input = test["input"].getStr()
-      discard decode(input, opts)
-      result.error = "Expected error but decode succeeded"
-    except:
-      result.passed = true
-    return
-
-  let input = test["input"].getStr()
-  let expected = test["expected"]
-
+proc runEncode(t: JsonNode): tuple[passed: bool, detail: string] =
+  let shouldError = t{"shouldError"}.getBool(false)
   try:
-    let decoded = decode(input, opts)
-    let gotJson = toonToJson(decoded)
+    let got = encode(fromJsonNode(t["input"]), encodeOptionsOf(t))
+    if shouldError: return (false, "expected an error, got " & got.escape)
+    let expected = t["expected"].getStr
+    if got == expected: (true, "")
+    else: (false, "expected " & expected.escape & "\n      got      " & got.escape)
+  except ToonEncodeError as e:
+    if shouldError: (true, "")
+    else: (false, "unexpected error: " & e.msg)
 
-    if compareJson(gotJson, expected):
-      result.passed = true
-    else:
-      result.error = "Mismatch: got " & $gotJson & ", expected " & $expected
+proc runDecode(t: JsonNode): tuple[passed: bool, detail: string] =
+  let shouldError = t{"shouldError"}.getBool(false)
+  try:
+    let got = toJsonNode(decode(t["input"].getStr, decodeOptionsOf(t)))
+    if shouldError: return (false, "expected an error, got " & $got)
+    if sameValue(got, t["expected"]): (true, "")
+    else: (false, "expected " & $t["expected"] & "\n      got      " & $got)
   except ToonDecodeError as e:
-    result.error = "Decode error: " & e.msg
-  except CatchableError as e:
-    result.error = "Error: " & e.msg
+    if shouldError: (true, "")
+    else: (false, "unexpected error: " & e.msg)
 
-proc runFixtureFile(path: string): tuple[passed: int, failed: int, results: seq[TestResult]] =
-  ## Run all tests in a fixture file
-  let content = readFile(path)
-  let fixture = parseJson(content)
+proc main(): int =
+  let root = currentSourcePath().parentDir
+  var outcomes: seq[Outcome]
+  for category in ["encode", "decode"]:
+    var files: seq[string]
+    for f in walkFiles(root / category / "*.json"): files.add f
+    files.sort()
+    for f in files:
+      for t in parseFile(f)["tests"]:
+        let (passed, detail) =
+          if category == "encode": runEncode(t) else: runDecode(t)
+        outcomes.add Outcome(file: category / f.extractFilename,
+                             name: t["name"].getStr, passed: passed, detail: detail)
+  var failed = 0
+  for o in outcomes:
+    if not o.passed:
+      inc failed
+      echo "[FAIL] ", o.file, ": ", o.name, "\n      ", o.detail
+  echo "TOON conformance: ", outcomes.len - failed, " / ", outcomes.len, " passed"
+  if failed > 0: 1 else: 0
 
-  let category = fixture["category"].getStr()
-  let tests = fixture["tests"]
-
-  for test in tests:
-    var testResult: TestResult
-    if category == "decode":
-      testResult = runDecodeTest(test)
-    else:
-      testResult.name = test["name"].getStr()
-      testResult.passed = true  # Skip non-decode tests for now
-
-    result.results.add(testResult)
-    if testResult.passed:
-      result.passed += 1
-    else:
-      result.failed += 1
-
-proc main() =
-  var totalPassed = 0
-  var totalFailed = 0
-  var allResults: seq[tuple[file: string, passed: int, failed: int]] = @[]
-
-  echo "=== TOON Fixture Test Runner ==="
-  echo ""
-
-  # Run decode fixtures
-  let decodeDir = "tests/fixtures/decode"
-  if dirExists(decodeDir):
-    echo "Decode fixtures:"
-    for kind, path in walkDir(decodeDir):
-      if kind == pcFile and path.endsWith(".json"):
-        let filename = path.extractFilename()
-        let (passed, failed, results) = runFixtureFile(path)
-        totalPassed += passed
-        totalFailed += failed
-        allResults.add((filename, passed, failed))
-
-        let status = if failed == 0: "[OK]" else: "[FAIL]"
-        echo "  " & status & " " & filename & ": " & $passed & " passed, " & $failed & " failed"
-
-        # Show failures
-        if failed > 0:
-          for r in results:
-            if not r.passed:
-              echo "    - " & r.name & ": " & r.error
-
-  # Run encode fixtures
-  let encodeDir = "tests/fixtures/encode"
-  if dirExists(encodeDir):
-    echo ""
-    echo "Encode fixtures:"
-    for kind, path in walkDir(encodeDir):
-      if kind == pcFile and path.endsWith(".json"):
-        let filename = path.extractFilename()
-        # Skip encode tests for now - they have different format
-        echo "  [SKIP] " & filename & " (encode tests not yet implemented)"
-
-  echo ""
-  echo "=== Summary ==="
-  echo "Total: " & $totalPassed & " passed, " & $totalFailed & " failed"
-
-  if totalFailed > 0:
-    quit(1)
-
-when isMainModule:
-  main()
+quit(main())

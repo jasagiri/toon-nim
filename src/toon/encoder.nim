@@ -1,289 +1,276 @@
-## TOON Format Encoder
-## Converts ToonValue structures to TOON format strings
+## TOON encoder, specification 4.4.
+##
+## The form of every value follows from its shape and position (§1.4, §9):
+## inline primitive arrays, tabular arrays with nested field groups, keyed
+## tabular objects, list form for everything else. The output has LF line
+## endings, no blank lines, no trailing spaces and no trailing newline (§12).
 
-import std/[strutils, algorithm, tables]
-import ./types
-import ./utils
+import std/[json, math, strutils, tables]
+import ./types, ./text
 
-# T050-T055: Encoding implementation
+type
+  Field = object
+    ## One entry of a header's field list; a nested field group when
+    ## `children` is not empty (§9.3).
+    name: string
+    children: seq[Field]
 
-proc needsKeyQuoting(key: string): bool =
-  ## Check if a key needs quoting
-  if key.len == 0:
-    return true
-  if key[0] in Whitespace or key[^1] in Whitespace:
-    return true
-  for c in key:
-    if c in {':', '"', '\\', '\n', '\r', '\t', '[', ']', '{', '}'}:
+  Encoder = object
+    opts: EncodeOptions
+    delim: char
+    lines: seq[string]
+
+proc isPrimitive(v: ToonValue): bool {.raises: [].} =
+  v.kind in {vkNull, vkBool, vkInt, vkFloat, vkString}
+
+proc canonicalNumber(f: float64): string {.raises: [].} =
+  ## The shortest round-trip digits of `f` (§2), in plain decimal when
+  ## 1e-6 <= |f| < 1e21 and in JSON exponent form otherwise.
+  if f == 0.0: return "0"
+  # `$` already gives the shortest digits that round-trip; only their layout
+  # differs from §2 (`1e+21`, `1000000.0`, `0.0000001`).
+  let shortest = $abs(f)
+  let ePos = shortest.find('e')
+  let mantissa = if ePos < 0: shortest else: shortest[0 ..< ePos]
+  var exponent = 0
+  if ePos >= 0:
+    for c in shortest[ePos + 1 .. ^1]:
+      if c in {'0' .. '9'}: exponent = exponent * 10 + (ord(c) - ord('0'))
+    if shortest[ePos + 1] == '-': exponent = -exponent
+  let dot = mantissa.find('.')
+  var digits = mantissa.replace(".", "")
+  # The value is 0.<digits> * 10^point.
+  var point = (if dot < 0: mantissa.len else: dot) + exponent
+  while digits.len > 1 and digits[0] == '0':
+    digits = digits[1 .. ^1]
+    dec point
+  digits = digits.strip(leading = false, chars = {'0'})
+  let sign = if f < 0: "-" else: ""
+  if abs(f) >= 1e-6 and abs(f) < 1e21:
+    if point <= 0:
+      sign & "0." & repeat('0', -point) & digits
+    elif point >= digits.len:
+      sign & digits & repeat('0', point - digits.len)
+    else:
+      sign & digits[0 ..< point] & "." & digits[point .. ^1]
+  else:
+    let e = point - 1
+    sign & digits[0 .. 0] & (if digits.len > 1: "." & digits[1 .. ^1] else: "") &
+      "e" & (if e < 0: "-" else: "+") & $abs(e)
+
+proc needsQuotes(s: string, delim: char, atRoot: bool): bool {.raises: [].} =
+  ## The conditions of §7.2.
+  if s.len == 0: return true
+  if s[0] in {' ', '\t'} or s[^1] in {' ', '\t'}: return true
+  if s in ["true", "false", "null"]: return true
+  if isNumericLike(s): return true
+  if s[0] in {'-', '#'}: return true
+  if atRoot and s.startsWith(Bom): return true
+  for c in s:
+    if c in {':', '"', '\\', '[', ']', '{', '}', '\x00' .. '\x1F'} or c == delim:
       return true
-  if not isValidIdentifier(key):
-    # Check for special characters that need quoting
-    for c in key:
-      if c notin {'A'..'Z', 'a'..'z', '0'..'9', '_', '-', '.'}:
-        return true
   false
 
-proc formatKey(key: string): string =
-  ## Format a key for output, quoting if necessary
-  if needsKeyQuoting(key):
-    quoteString(key)
-  else:
-    key
-
-proc isSimpleArray(arr: seq[ToonValue]): bool =
-  ## Check if array contains only primitives (suitable for inline format)
-  for item in arr:
-    if item.kind in {vkArray, vkObject}:
-      return false
-  true
-
-proc isIdentifierSegment(s: string): bool =
-  ## Check if string is a valid identifier segment for key folding
-  ## Must match ^[A-Za-z_][A-Za-z0-9_]*$
-  if s.len == 0:
-    return false
-  if s[0] notin {'A'..'Z', 'a'..'z', '_'}:
-    return false
-  for i in 1..<s.len:
-    if s[i] notin {'A'..'Z', 'a'..'z', '0'..'9', '_'}:
-      return false
-  true
-
-proc canFoldKey(key: string, val: ToonValue, opts: EncodeOptions): bool =
-  ## Check if this key-value pair can be folded (has single-key object value)
-  if opts.keyFolding != kfSafe:
-    return false
-  if not isIdentifierSegment(key):
-    return false
-  if val.kind != vkObject:
-    return false
-  if val.objectVal.len != 1:
-    return false
-  # Check if the nested key is also a valid identifier
-  for nestedKey in val.objectVal.keys:
-    if not isIdentifierSegment(nestedKey):
-      return false
-  true
-
-proc collectFoldedPath(key: string, val: ToonValue, opts: EncodeOptions): tuple[path: string, finalVal: ToonValue] =
-  ## Collect the full dotted path and final value for key folding
-  var path = key
-  var current = val
-
-  while current.kind == vkObject and current.objectVal.len == 1:
-    var nestedKey: string
-    var nestedVal: ToonValue
-    for k, v in current.objectVal:
-      nestedKey = k
-      nestedVal = v
-      break
-
-    if not isIdentifierSegment(nestedKey):
-      break
-
-    path.add(".")
-    path.add(nestedKey)
-    current = nestedVal
-
-  (path, current)
-
-proc encodeValue(v: ToonValue, opts: EncodeOptions, indent: int): string
-
-proc encodeArray(arr: seq[ToonValue], opts: EncodeOptions, indent: int): string =
-  ## Encode an array
-  if arr.len == 0:
-    return "null"
-
-  # Check if we can use inline format
-  if isSimpleArray(arr):
-    var parts: seq[string] = @[]
-    let delimStr = case opts.delimiter
-      of dlComma: ", "
-      of dlTab: "\t"
-      of dlPipe: "|"
-
-    for item in arr:
-      case item.kind
-      of vkNull:
-        parts.add("null")
-      of vkBool:
-        parts.add(if item.boolVal: "true" else: "false")
-      of vkInt:
-        parts.add($item.intVal)
-      of vkFloat:
-        parts.add($item.floatVal)
-      of vkString:
-        if needsQuoting(item.strVal, opts.delimiter):
-          parts.add(quoteString(item.strVal))
-        else:
-          parts.add(item.strVal)
-      else:
-        discard
-    return parts.join(delimStr)
-
-  # Use list format for complex arrays
-  result = ""
-  let indentStr = makeIndent(indent, opts.indent)
-  for i, item in arr:
-    if i > 0:
-      result.add("\n")
-    result.add(indentStr)
-    result.add("- ")
-    if item.kind == vkObject:
-      # Object in list - first key on same line
-      var first = true
-      for key, val in item.objectVal:
-        if first:
-          result.add(formatKey(key))
-          result.add(": ")
-          if val.kind in {vkObject, vkArray}:
-            if val.kind == vkArray and isSimpleArray(val.arrayVal):
-              result.add(encodeArray(val.arrayVal, opts, indent + 1))
-            else:
-              result.add("\n")
-              result.add(encodeValue(val, opts, indent + 2))
-          else:
-            result.add(encodeValue(val, opts, indent + 1))
-          first = false
-        else:
-          result.add("\n")
-          result.add(makeIndent(indent + 1, opts.indent))
-          result.add(formatKey(key))
-          result.add(": ")
-          if val.kind in {vkObject, vkArray}:
-            if val.kind == vkArray and isSimpleArray(val.arrayVal):
-              result.add(encodeArray(val.arrayVal, opts, indent + 2))
-            else:
-              result.add("\n")
-              result.add(encodeValue(val, opts, indent + 2))
-          else:
-            result.add(encodeValue(val, opts, indent + 2))
-    elif item.kind == vkArray:
-      result.add(encodeArray(item.arrayVal, opts, indent + 1))
-    else:
-      result.add(encodeValue(item, opts, indent + 1))
-
-proc encodeObject(obj: ToonValue, opts: EncodeOptions, indent: int): string =
-  ## Encode an object
-  if obj.objectVal.len == 0:
-    return ""
-
-  var keys: seq[string] = @[]
-  for k in obj.objectVal.keys:
-    keys.add(k)
-
-  if opts.sortKeys:
-    keys.sort()
-
-  result = ""
-  let indentStr = makeIndent(indent, opts.indent)
-
-  for i, key in keys:
-    if i > 0:
-      result.add("\n")
-
-    let val = obj.objectVal[key]
-
-    # Check for key folding opportunity
-    if canFoldKey(key, val, opts):
-      let (foldedPath, finalVal) = collectFoldedPath(key, val, opts)
-      result.add(indentStr)
-      result.add(foldedPath)
-      result.add(": ")
-
-      case finalVal.kind
-      of vkObject:
-        if finalVal.objectVal.len == 0:
-          result.add("null")
-        else:
-          result.add("\n")
-          result.add(encodeObject(finalVal, opts, indent + 1))
-      of vkArray:
-        if finalVal.arrayVal.len == 0:
-          result.add("null")
-        elif isSimpleArray(finalVal.arrayVal):
-          result.add(encodeArray(finalVal.arrayVal, opts, indent + 1))
-        else:
-          result.add("\n")
-          result.add(encodeArray(finalVal.arrayVal, opts, indent + 1))
-      else:
-        result.add(encodeValue(finalVal, opts, indent))
-    else:
-      result.add(indentStr)
-      result.add(formatKey(key))
-      result.add(": ")
-
-      case val.kind
-      of vkObject:
-        if val.objectVal.len == 0:
-          result.add("null")
-        else:
-          result.add("\n")
-          result.add(encodeObject(val, opts, indent + 1))
-      of vkArray:
-        if val.arrayVal.len == 0:
-          result.add("null")
-        elif isSimpleArray(val.arrayVal):
-          result.add(encodeArray(val.arrayVal, opts, indent + 1))
-        else:
-          result.add("\n")
-          result.add(encodeArray(val.arrayVal, opts, indent + 1))
-      else:
-        result.add(encodeValue(val, opts, indent))
-
-proc encodeValue(v: ToonValue, opts: EncodeOptions, indent: int): string =
-  ## Encode any ToonValue
+proc primitive(e: Encoder, v: ToonValue, atRoot = false): string
+    {.raises: [ToonEncodeError].} =
   case v.kind
-  of vkNull:
-    "null"
-  of vkBool:
-    if v.boolVal: "true" else: "false"
-  of vkInt:
-    $v.intVal
+  of vkNull: "null"
+  of vkBool: (if v.boolVal: "true" else: "false")
+  of vkInt: $v.intVal
   of vkFloat:
-    $v.floatVal
+    if v.floatVal.classify in {fcNan, fcInf, fcNegInf}: "null"
+    else: canonicalNumber(v.floatVal)
   of vkString:
-    if needsQuoting(v.strVal):
-      quoteString(v.strVal)
-    else:
-      v.strVal
-  of vkArray:
-    encodeArray(v.arrayVal, opts, indent)
-  of vkObject:
-    encodeObject(v, opts, indent)
+    if not isWellFormedUtf8(v.strVal):
+      raise newToonEncodeError("string is not well-formed UTF-8 " &
+                               "(an unpaired surrogate cannot be encoded): " &
+                               v.strVal.escape)
+    if needsQuotes(v.strVal, e.delim, atRoot): quoted(v.strVal) else: v.strVal
+  of vkArray, vkObject: ""
 
-# T056: encode() public function
-proc encode*(v: ToonValue, opts: EncodeOptions = defaultEncodeOptions): string =
-  ## Encode a ToonValue to TOON format string
+proc key(k: string): string {.raises: [ToonEncodeError].} =
+  if not isWellFormedUtf8(k):
+    raise newToonEncodeError("key is not well-formed UTF-8: " & k.escape)
+  encodedKey(k)
+
+proc sameKeys(a, b: ToonValue): bool {.raises: [].} =
+  ## The same set of keys, in any order.
+  if a.objectVal.len != b.objectVal.len: return false
+  for k in a.objectVal.keys:
+    if not b.objectVal.hasKey(k): return false
+  true
+
+proc columns(values: seq[ToonValue], fields: var seq[Field]): bool {.raises: [].} =
+  ## Whether `values` (non-empty objects with one set of keys) form a table
+  ## whose every column is uniform-primitive or nested-uniform (§9.3); the
+  ## field list, in the first value's key order, goes to `fields`.
+  if values.len == 0: return false
+  for v in values:
+    if v.kind != vkObject or v.objectVal.len == 0 or not sameKeys(v, values[0]):
+      return false
+  fields = @[]
+  for k in values[0].objectVal.keys:
+    var column: seq[ToonValue]
+    for v in values: column.add v.objectVal.getOrDefault(k)
+    var allPrimitive = true
+    for c in column:
+      if not c.isPrimitive: allPrimitive = false
+    if allPrimitive:
+      fields.add Field(name: k)
+    else:
+      var sub: seq[Field]
+      if not columns(column, sub): return false
+      fields.add Field(name: k, children: sub)
+  true
+
+proc delimSymbol(e: Encoder): string {.raises: [].} =
+  if e.delim == ',': "" else: $e.delim
+
+proc fieldList(e: Encoder, fields: seq[Field]): string {.raises: [ToonEncodeError].} =
+  var parts: seq[string]
+  for f in fields:
+    parts.add key(f.name) & (if f.children.len > 0: e.fieldList(f.children) else: "")
+  "{" & parts.join($e.delim) & "}"
+
+proc cells(e: Encoder, v: ToonValue, fields: seq[Field], into: var seq[string])
+    {.raises: [ToonEncodeError].} =
+  ## The leaf values of `v`, depth-first in field-list order (§9.3).
+  for f in fields:
+    let value = v.objectVal.getOrDefault(f.name)
+    if f.children.len > 0: e.cells(value, f.children, into)
+    else: into.add e.primitive(value)
+
+proc row(e: Encoder, v: ToonValue, fields: seq[Field]): string
+    {.raises: [ToonEncodeError].} =
+  var parts: seq[string]
+  e.cells(v, fields, parts)
+  parts.join($e.delim)
+
+proc indent(e: Encoder, depth: int): string {.raises: [].} =
+  repeat(' ', depth * e.opts.indentSize)
+
+proc emit(e: var Encoder, depth: int, content: string) {.raises: [].} =
+  e.lines.add e.indent(depth) & content
+
+proc isKeyedTable(v: ToonValue, fields: var seq[Field]): bool {.raises: [].} =
+  ## Keyed tabular detection (§9.5): two or more entries of uniform objects.
+  if v.objectVal.len < 2: return false
+  var values: seq[ToonValue]
+  for x in v.objectVal.values: values.add x
+  columns(values, fields)
+
+proc allPrimitive(items: seq[ToonValue]): bool {.raises: [].} =
+  for x in items:
+    if not x.isPrimitive: return false
+  true
+
+proc keyedTable(e: var Encoder, prefix: string, v: ToonValue, fields: seq[Field],
+                depth: int) {.raises: [ToonEncodeError].} =
+  ## A keyed tabular object (§9.5) whose header is `prefix` (an encoded key,
+  ## or empty at the root).
+  e.emit(depth, prefix & "[" & $v.objectVal.len & ":" & e.delimSymbol & "]" &
+                e.fieldList(fields) & ":")
+  for entry, value in v.objectVal:
+    e.emit(depth + 1, key(entry) & ": " & e.row(value, fields))
+
+proc fields(e: var Encoder, obj: ToonValue, depth: int) {.raises: [ToonEncodeError].}
+proc listItem(e: var Encoder, v: ToonValue, depth: int) {.raises: [ToonEncodeError].}
+
+proc arrayAt(e: var Encoder, prefix: string, items: seq[ToonValue], depth: int,
+             tabularAllowed: bool) {.raises: [ToonEncodeError].} =
+  ## A non-empty array whose header is `prefix` (an encoded key, or empty)
+  ## standing at `depth`.
+  let bracket = "[" & $items.len & e.delimSymbol & "]"
+  if allPrimitive(items):
+    var parts: seq[string]
+    for x in items: parts.add e.primitive(x)
+    e.emit(depth, prefix & bracket & ": " & parts.join($e.delim))
+    return
+  var fields: seq[Field]
+  if tabularAllowed and columns(items, fields):
+    e.emit(depth, prefix & bracket & e.fieldList(fields) & ":")
+    for x in items: e.emit(depth + 1, e.row(x, fields))
+    return
+  e.emit(depth, prefix & bracket & ":")
+  for x in items: e.listItem(x, depth + 1)
+
+proc field(e: var Encoder, k: string, v: ToonValue, depth: int)
+    {.raises: [ToonEncodeError].} =
+  ## One object field at `depth` (§8, §9).
+  let name = key(k)
+  case v.kind
+  of vkArray:
+    if v.arrayVal.len == 0: e.emit(depth, name & ": []")
+    else: e.arrayAt(name, v.arrayVal, depth, tabularAllowed = true)
+  of vkObject:
+    var fields: seq[Field]
+    if isKeyedTable(v, fields):
+      e.keyedTable(name, v, fields, depth)
+    else:
+      e.emit(depth, name & ":")
+      e.fields(v, depth + 1)
+  else:
+    e.emit(depth, name & ": " & e.primitive(v))
+
+proc fields(e: var Encoder, obj: ToonValue, depth: int) =
+  for k, v in obj.objectVal: e.field(k, v, depth)
+
+proc onHyphen(e: var Encoder, first: int, depth: int) {.raises: [].} =
+  ## Puts the line `first`, written at `depth` or deeper, after a list-item
+  ## hyphen at `depth` (§10).
+  e.lines[first] = e.indent(depth) & "- " &
+                   e.lines[first].strip(trailing = false, chars = {' '})
+
+proc listItem(e: var Encoder, v: ToonValue, depth: int) =
+  ## One element of an array in list form, at item depth `depth` (§9.4, §10).
+  case v.kind
+  of vkArray:
+    # A keyless header on the hyphen line is the item itself: its items stand
+    # at depth + 1, and tabular form is not available here (§9.4).
+    let first = e.lines.len
+    if v.arrayVal.len == 0: e.emit(depth, "[0" & e.delimSymbol & "]:")
+    else: e.arrayAt("", v.arrayVal, depth, tabularAllowed = false)
+    e.onHyphen(first, depth)
+  of vkObject:
+    if v.objectVal.len == 0:
+      e.emit(depth, "-")
+      return
+    # The first field stands at depth + 1 on the hyphen line; the others, and
+    # the content of a scope it opens, follow from that depth.
+    let first = e.lines.len
+    e.fields(v, depth + 1)
+    e.onHyphen(first, depth)
+  else:
+    e.emit(depth, "- " & e.primitive(v))
+
+proc encode*(v: ToonValue, opts: EncodeOptions = defaultEncodeOptions): string
+    {.raises: [ToonEncodeError].} =
+  ## Encodes `v` as a TOON document (specification 4.4).
   ##
-  ## Args:
-  ##   v: The ToonValue to encode
-  ##   opts: Encoding options (indent, delimiter, key folding, etc.)
-  ##
-  ## Returns:
-  ##   TOON format string
-  ##
-  ## Raises:
-  ##   ToonEncodeError: If the value cannot be encoded
+  ## Raises ToonEncodeError for a string or key that is not well-formed UTF-8,
+  ## and for an indentSize below 1.
+  if opts.indentSize < 1:
+    raise newToonEncodeError("indentSize must be at least 1")
+  var e = Encoder(opts: opts, delim: ($opts.delimiter)[0])
   case v.kind
   of vkObject:
-    encodeObject(v, opts, 0)
+    var fields: seq[Field]
+    if isKeyedTable(v, fields): e.keyedTable("", v, fields, 0)
+    else: e.fields(v, 0)
   of vkArray:
-    encodeArray(v.arrayVal, opts, 0)
+    if v.arrayVal.len == 0: e.emit(0, "[]")
+    else: e.arrayAt("", v.arrayVal, 0, tabularAllowed = true)
   else:
-    encodeValue(v, opts, 0)
+    e.emit(0, e.primitive(v, atRoot = true))
+  e.lines.join("\n")
 
-# T057: encodeToFile() public function
-proc encodeToFile*(v: ToonValue, path: string, opts: EncodeOptions = defaultEncodeOptions) =
-  ## Encode a ToonValue and write to a file
-  ##
-  ## Args:
-  ##   v: The ToonValue to encode
-  ##   path: Path to the output file
-  ##   opts: Encoding options
-  ##
-  ## Raises:
-  ##   IOError: If the file cannot be written
-  ##   ToonEncodeError: If the value cannot be encoded
-  let content = encode(v, opts)
-  writeFile(path, content)
+proc encode*(j: JsonNode, opts: EncodeOptions = defaultEncodeOptions): string
+    {.raises: [ToonEncodeError].} =
+  ## Encodes a JSON value as a TOON document.
+  encode(fromJsonNode(j), opts)
+
+proc encodeToFile*(v: ToonValue, path: string,
+                   opts: EncodeOptions = defaultEncodeOptions)
+    {.raises: [ToonEncodeError, IOError].} =
+  ## Encodes `v` and writes the document to `path`.
+  writeFile(path, encode(v, opts))

@@ -1,7 +1,7 @@
 ## TOON Format Types
 ## Core type definitions for TOON (Token-Oriented Object Notation)
 
-import std/[tables, json]
+import std/[tables, json, parseutils]
 
 # T005: ToonValueKind enum
 type
@@ -22,22 +22,6 @@ type
     dlComma = ","   ## Comma delimiter (default)
     dlTab = "\t"    ## Tab delimiter
     dlPipe = "|"    ## Pipe delimiter
-
-# T007: KeyFoldingMode enum
-type
-  KeyFoldingMode* = enum
-    ## Key folding behavior for encoding
-    kfNone   ## No key folding (default)
-    kfSafe   ## Fold only identifier-safe keys (a.b.c pattern)
-    kfAll    ## Fold all keys (may require quoting)
-
-# T008: PathExpansionMode enum
-type
-  PathExpansionMode* = enum
-    ## Path expansion behavior for decoding
-    peNone   ## No path expansion (default)
-    peSafe   ## Expand only identifier-safe paths
-    peAll    ## Expand all dotted paths
 
 # T009: ToonValue object variant
 type
@@ -62,32 +46,20 @@ type
 # T010: EncodeOptions type
 type
   EncodeOptions* = object
-    ## Configuration for TOON encoding behavior
-    indent*: int              ## Spaces per indent level (default: 2)
-    delimiter*: Delimiter     ## Array delimiter (default: dlComma)
-    keyFolding*: KeyFoldingMode  ## Key folding behavior (default: kfNone)
-    sortKeys*: bool           ## Sort object keys alphabetically (default: false)
+    ## Configuration for TOON encoding (specification §13)
+    indentSize*: int          ## Spaces per indent level (default: 2)
+    delimiter*: Delimiter     ## Document delimiter (default: dlComma)
 
-const defaultEncodeOptions* = EncodeOptions(
-  indent: 2,
-  delimiter: dlComma,
-  keyFolding: kfNone,
-  sortKeys: false
-)
+const defaultEncodeOptions* = EncodeOptions(indentSize: 2, delimiter: dlComma)
 
 # T011: DecodeOptions type
 type
   DecodeOptions* = object
-    ## Configuration for TOON decoding behavior
+    ## Configuration for TOON decoding (specification §13)
     strict*: bool               ## Strict validation mode (default: true)
-    expandPaths*: PathExpansionMode  ## Path expansion behavior (default: peNone)
     indentSize*: int            ## Expected indent size (default: 2)
 
-const defaultDecodeOptions* = DecodeOptions(
-  strict: true,
-  expandPaths: peNone,
-  indentSize: 2
-)
+const defaultDecodeOptions* = DecodeOptions(strict: true, indentSize: 2)
 
 # T012: Error types
 type
@@ -288,13 +260,17 @@ proc delete*(v: var ToonValue, key: string) =
     raise newException(ValueError, "ToonValue is not an object")
   v.objectVal.del(key)
 
-# T080: Equality comparison (forward declaration for round-trip)
+# T080: Equality comparison
 proc `==`*(a, b: ToonValue): bool =
-  ## Compare two ToonValues for equality
-  if a.isNil and b.isNil:
-    return true
+  ## JSON-model equality (specification §2): numbers compare by value, so an
+  ## integer equals the float of the same value; objects compare by their
+  ## ordered key sequence.
   if a.isNil or b.isNil:
-    return false
+    return a.isNil and b.isNil
+  if a.kind in {vkInt, vkFloat} and b.kind in {vkInt, vkFloat}:
+    if a.kind == vkInt and b.kind == vkInt:
+      return a.intVal == b.intVal
+    return a.getFloat() == b.getFloat()
   if a.kind != b.kind:
     return false
 
@@ -303,10 +279,8 @@ proc `==`*(a, b: ToonValue): bool =
     true
   of vkBool:
     a.boolVal == b.boolVal
-  of vkInt:
-    a.intVal == b.intVal
-  of vkFloat:
-    a.floatVal == b.floatVal
+  of vkInt, vkFloat:
+    false
   of vkString:
     a.strVal == b.strVal
   of vkArray:
@@ -319,13 +293,18 @@ proc `==`*(a, b: ToonValue): bool =
   of vkObject:
     if a.objectVal.len != b.objectVal.len:
       return false
+    var bKeys: seq[string]
+    for key in b.objectVal.keys:
+      bKeys.add key
+    var i = 0
     for key, val in a.objectVal:
-      if key notin b.objectVal or b.objectVal[key] != val:
+      if key != bKeys[i] or b.objectVal[key] != val:
         return false
+      inc i
     true
 
 # T082: JSON interoperability
-proc toJsonNode*(v: ToonValue): JsonNode =
+proc toJsonNode*(v: ToonValue): JsonNode {.raises: [].} =
   ## Convert ToonValue to JsonNode
   case v.kind
   of vkNull:
@@ -349,7 +328,7 @@ proc toJsonNode*(v: ToonValue): JsonNode =
       obj[key] = val.toJsonNode()
     obj
 
-proc fromJsonNode*(j: JsonNode): ToonValue =
+proc fromJsonNode*(j: JsonNode): ToonValue {.raises: [].} =
   ## Convert JsonNode to ToonValue
   case j.kind
   of JNull:
@@ -361,7 +340,15 @@ proc fromJsonNode*(j: JsonNode): ToonValue =
   of JFloat:
     newToonFloat(j.getFloat())
   of JString:
-    newToonString(j.getStr())
+    # std/json keeps an integer literal beyond int64 as a JString whose `$`
+    # is the bare literal (the flag that marks it is not exported). Such a
+    # number becomes its float64 approximation, the policy of README.md.
+    let raw = $j
+    var approximation: float
+    if raw.len > 0 and raw[0] != '"' and parseFloat(raw, approximation) == raw.len:
+      newToonFloat(approximation)
+    else:
+      newToonString(j.getStr())
   of JArray:
     var arr = newToonArray()
     for item in j:

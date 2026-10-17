@@ -1,204 +1,109 @@
 # toon-nim
 
-A Nim library and CLI tool for working with TOON (Token-Oriented Object Notation) format.
+A Nim encoder and decoder for TOON (Token-Oriented Object Notation), a
+line-oriented encoding of the JSON data model meant for passing data to LLMs.
 
-TOON is a compact, human-readable data format designed for LLM contexts. It achieves 10-20% token reduction compared to JSON while maintaining human readability.
+`toon-spec: 4.4` — conforms to the [TOON specification](https://github.com/toon-format/spec)
+4.4 and passes all 564 of its official conformance fixtures (encode 160,
+decode 404). See [Conformance](#conformance).
 
 ## Installation
 
-### Using Nimble
-
 ```bash
-nimble install toon_nim
+nimble install https://github.com/jasagiri/toon-nim
 ```
 
-### From Source
-
-```bash
-git clone https://github.com/jasagiri/toon-nim.git
-cd toon-nim
-nimble build
-```
-
-## Quick Start
-
-### Library Usage
+## Usage
 
 ```nim
+import std/json
 import toon
 
-# Decode TOON to ToonValue
-let data = decode("""
-name: Ada Lovelace
-age: 42
-skills: math, programming, logic
-""")
+# JSON in, TOON out
+echo encode(parseJson("""{"users": [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Bob"}]}"""))
+# users[2]{id,name}:
+#   1,Ada
+#   2,Bob
 
-echo data["name"].getStr()  # Ada Lovelace
-echo data["age"].getInt()   # 42
-echo data["skills"][0].getStr()  # math
-
-# Encode ToonValue to TOON
-let person = newToonObject({
-  "name": newToonString("Bob"),
-  "active": newToonBool(true),
-  "scores": newToonArray([newToonInt(95), newToonInt(87)])
-})
-
-echo encode(person)
-# Output:
-# name: Bob
-# active: true
-# scores: 95, 87
+# TOON in, a value out
+let v = decode("name: Ada\ntags[2]: math,code")
+echo v["tags"][1].getStr()    # code
+echo v.toJsonNode()           # {"name":"Ada","tags":["math","code"]}
 ```
 
-### CLI Usage
+### API
+
+| Proc | Purpose |
+|---|---|
+| `encode(v: ToonValue, opts = defaultEncodeOptions): string` | Encode a value |
+| `encode(j: JsonNode, opts = defaultEncodeOptions): string` | Encode a JSON value |
+| `encodeToFile(v, path, opts)` | Encode and write a file |
+| `decode(input: string, opts = defaultDecodeOptions): ToonValue` | Decode a document |
+| `decodeFile(path, opts)` | Read and decode a file |
+| `toJsonNode(v)`, `fromJsonNode(j)` | Convert between `ToonValue` and `JsonNode` |
+
+Options (specification §13):
+
+- `EncodeOptions(indentSize: 2, delimiter: dlComma)` — `delimiter` is the
+  document delimiter: `dlComma`, `dlTab` or `dlPipe`.
+- `DecodeOptions(strict: true, indentSize: 2)` — with `strict = false`, only
+  the five recoveries of §14.4 apply.
+
+Errors: `encode` raises `ToonEncodeError` for a string or key that is not
+well-formed UTF-8; `decode` raises `ToonDecodeError`, whose `line` is the
+1-based input line, on every condition of §14.
+
+`ToonValue` is a variant of null, bool, int (int64), float (float64), string,
+array and object (`OrderedTable`, so key order is kept). Constructors are
+`newToonNull`, `newToonBool`, `newToonInt`, `newToonFloat`, `newToonString`,
+`newToonArray` and `newToonObject`; accessors are `getBool`, `getInt`,
+`getFloat`, `getStr`, `[]`, `hasKey`, `keys`, `items` and `pairs`. `==` is the
+JSON-model equality of §2.
+
+## CLI
 
 ```bash
-# Convert TOON to JSON
-tooncli data.toon --json
-
-# Convert JSON to TOON
-tooncli data.json --toon
-
-# Read from stdin
-echo "name: Ada" | tooncli --json -
-
-# Write to file
-tooncli data.toon --json -o=output.json
-
-# Custom formatting
-tooncli data.json --toon --indent=4 --delimiter=tab
+nimble buildCli
+bin/tooncli data.json --toon          # JSON to TOON
+bin/tooncli data.toon --json          # TOON to JSON
+echo "name: Ada" | bin/tooncli - --json
+bin/tooncli data.json --toon --indent=4 --delimiter=tab
+bin/tooncli data.toon --json --lenient   # non-strict decoding
 ```
 
-## TOON Format Overview
+The format is chosen from the file extension or the first character when
+neither `--json` nor `--toon` is given. Run `bin/tooncli --help` for all options.
 
-TOON is designed to be concise yet readable:
+## Conformance
 
-```toon
-# Simple key-value pairs
-name: Ada Lovelace
-age: 42
+Declarations the specification asks of an implementation (§13.2):
 
-# Nested objects use indentation
-address:
-  city: London
-  country: UK
+- **Numbers (§4).** An integer token within int64 decodes to an int; any other
+  number token decodes to the nearest float64. A number whose magnitude is
+  beyond float64 (`1e400`) is an error. When encoding, an integer beyond int64
+  read from `JsonNode` is its float64 approximation, written in the shortest
+  round-trip digits of §2. No lossless stringification option is offered.
+- **Keys (§2, §15).** Objects are `OrderedTable[string, ToonValue]`: document
+  order is kept and every key, including `__proto__`, is an ordinary entry.
+- **Bytes (§4).** `decode` takes a Nim `string`, which may hold any bytes, so
+  it checks UTF-8 well-formedness and errors on ill-formed input.
 
-# Arrays can be inline or list format
-colors: red, green, blue
+Not offered: a validator (§13.3) and serialization hooks (§3).
 
-people:
-- name: Alice
-  role: engineer
-- name: Bob
-  role: designer
-```
-
-Compared to equivalent JSON:
-
-```json
-{
-  "name": "Ada Lovelace",
-  "age": 42,
-  "address": {
-    "city": "London",
-    "country": "UK"
-  },
-  "colors": ["red", "green", "blue"],
-  "people": [
-    {"name": "Alice", "role": "engineer"},
-    {"name": "Bob", "role": "designer"}
-  ]
-}
-```
-
-## API Reference
-
-### Types
-
-- `ToonValue`: The main value type (null, bool, int, float, string, array, object)
-- `EncodeOptions`: Options for encoding (indent, delimiter, sortKeys)
-- `DecodeOptions`: Options for decoding (strict mode, indent size)
-
-### Constructors
-
-```nim
-newToonNull(): ToonValue
-newToonBool(val: bool): ToonValue
-newToonInt(val: int64): ToonValue
-newToonFloat(val: float): ToonValue
-newToonString(val: string): ToonValue
-newToonArray(items: varargs[ToonValue]): ToonValue
-newToonObject(pairs: varargs[(string, ToonValue)]): ToonValue
-```
-
-### Accessors
-
-```nim
-v.getBool(): bool
-v.getInt(): int64
-v.getFloat(): float
-v.getStr(): string
-v[key: string]: ToonValue  # object access
-v[index: int]: ToonValue   # array access
-v.hasKey(key: string): bool
-v.keys(): seq[string]
-```
-
-### Encoding/Decoding
-
-```nim
-# Decode TOON string to ToonValue
-proc decode*(input: string, opts: DecodeOptions = defaultDecodeOptions): ToonValue
-
-# Decode TOON file to ToonValue
-proc decodeFile*(path: string, opts: DecodeOptions = defaultDecodeOptions): ToonValue
-
-# Encode ToonValue to TOON string
-proc encode*(v: ToonValue, opts: EncodeOptions = defaultEncodeOptions): string
-
-# Encode ToonValue to file
-proc encodeToFile*(v: ToonValue, path: string, opts: EncodeOptions = defaultEncodeOptions)
-```
-
-## CLI Reference
-
-```
-tooncli - TOON Format CLI Converter
-
-Usage: tooncli [OPTIONS] [FILE]
-
-Arguments:
-  FILE                Input file (use '-' for stdin)
-
-Options:
-  -h, --help          Show help message
-  -v, --version       Show version number
-  -j, --json          Output as JSON
-  -t, --toon          Output as TOON
-  -o, --output FILE   Write output to file
-  --pretty            Pretty-print JSON (default)
-  --compact           Compact JSON output
-  --indent N          Indentation size (default: 2)
-  --delimiter TYPE    Array delimiter: comma, tab, pipe
-  --sort-keys         Sort object keys alphabetically
-  --strict            Enable strict mode parsing
-```
+Each obligation of §13 and §14 is tied to its tests in
+[`docs/quality/spec-traceability.md`](docs/quality/spec-traceability.md).
 
 ## Testing
 
 ```bash
-# Run all tests
-nimble test
-
-# Run unit tests only
-nimble testUnit
-
-# Run integration tests only
-nimble testIntegration
+nimble test          # conformance fixtures, host rules, types, round trip, CLI
+nimble conformance   # the official fixtures only
 ```
+
+The fixtures in `tests/fixtures` come unchanged from the specification
+repository (MIT); `tests/fixtures/README.md` records the commit.
 
 ## License
 
-Apache-2.0
+Apache-2.0. The conformance fixtures are MIT, Copyright (c) 2025-PRESENT
+Johann Schopplich.

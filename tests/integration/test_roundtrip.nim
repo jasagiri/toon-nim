@@ -2,7 +2,7 @@
 ## T076-T079: Round-trip tests
 
 import unittest
-import std/[strutils, tables]
+import std/tables
 import ../../src/toon
 
 # Helper to check round-trip
@@ -165,8 +165,9 @@ suite "round-trip arrays":
     let v = newToonObject({"empty": arr})
     let encoded = encode(v)
     let decoded = decode(encoded)
-    # Empty array encodes as null
-    check decoded["empty"].kind == vkNull
+    check encoded == "empty: []"
+    check decoded["empty"].kind == vkArray
+    check decoded["empty"].len == 0
 
 # T079: Round-trip tests for edge cases
 suite "round-trip edge cases":
